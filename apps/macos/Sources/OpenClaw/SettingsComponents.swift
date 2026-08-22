@@ -1,24 +1,59 @@
 import SwiftUI
 
 enum SettingsLayout {
-    static let scrollbarGutter: CGFloat = 36
+    static let sidebarWidth: CGFloat = 250
+    static let detailHorizontalPadding: CGFloat = 22
+    static let detailVerticalPadding: CGFloat = 18
+    static let nestedSidebarWidth: CGFloat = 260
+    static let detailBottomPadding: CGFloat = 16
+}
+
+extension View {
+    func settingsDetailContent() -> some View {
+        self
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+            .padding(.bottom, SettingsLayout.detailBottomPadding)
+    }
+}
+
+enum SettingsTextValue: ExpressibleByStringLiteral {
+    case localized(LocalizedStringKey)
+    case verbatim(String)
+
+    init(stringLiteral value: String) {
+        self = .localized(LocalizedStringKey(value))
+    }
+
+    static func localized(_ value: String) -> Self {
+        .localized(LocalizedStringKey(value))
+    }
+
+    var text: Text {
+        switch self {
+        case let .localized(key):
+            Text(key)
+        case let .verbatim(value):
+            Text(verbatim: value)
+        }
+    }
 }
 
 struct SettingsPageHeader: View {
-    let title: String
-    let subtitle: String?
+    let title: SettingsTextValue
+    let subtitle: SettingsTextValue?
 
-    init(title: String, subtitle: String? = nil) {
+    init(title: SettingsTextValue, subtitle: SettingsTextValue? = nil) {
         self.title = title
         self.subtitle = subtitle
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(self.title)
+            self.title.text
                 .font(.title3.weight(.semibold))
-            if let subtitle, !subtitle.isEmpty {
-                Text(subtitle)
+            if let subtitle {
+                subtitle.text
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -27,45 +62,25 @@ struct SettingsPageHeader: View {
     }
 }
 
-struct SettingsSection<Content: View>: View {
-    let title: String
-    let content: Content
-
-    init(_ title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(self.title)
-                .font(.headline)
-            VStack(alignment: .leading, spacing: 12) {
-                self.content
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
 struct SettingsCardGroup<Content: View>: View {
-    let title: String
+    let title: SettingsTextValue
     let content: Content
 
-    init(_ title: String, @ViewBuilder content: () -> Content) {
+    init(_ title: SettingsTextValue, @ViewBuilder content: () -> Content) {
         self.title = title
         self.content = content()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(self.title)
+            self.title.text
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
                 self.content
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(.quaternary.opacity(0.38), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -76,14 +91,14 @@ struct SettingsCardGroup<Content: View>: View {
 }
 
 struct SettingsCardRow<Content: View>: View {
-    let title: String
-    let subtitle: String?
+    let title: SettingsTextValue
+    let subtitle: SettingsTextValue?
     var showsDivider = true
     let content: Content
 
     init(
-        title: String,
-        subtitle: String? = nil,
+        title: SettingsTextValue,
+        subtitle: SettingsTextValue? = nil,
         showsDivider: Bool = true,
         @ViewBuilder content: () -> Content)
     {
@@ -96,10 +111,10 @@ struct SettingsCardRow<Content: View>: View {
     var body: some View {
         HStack(alignment: .center, spacing: 18) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(self.title)
+                self.title.text
                     .font(.callout.weight(.medium))
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
+                if let subtitle {
+                    subtitle.text
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -110,6 +125,7 @@ struct SettingsCardRow<Content: View>: View {
 
             self.content
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
         .overlay(alignment: .bottom) {
@@ -122,8 +138,8 @@ struct SettingsCardRow<Content: View>: View {
 }
 
 struct SettingsCardToggleRow: View {
-    let title: String
-    let subtitle: String?
+    let title: SettingsTextValue
+    let subtitle: SettingsTextValue?
     @Binding var binding: Bool
     var showsDivider = true
 
@@ -133,32 +149,11 @@ struct SettingsCardToggleRow: View {
             subtitle: self.subtitle,
             showsDivider: self.showsDivider)
         {
-            Toggle(self.title, isOn: self.$binding)
-                .labelsHidden()
-                .toggleStyle(.switch)
-        }
-    }
-}
-
-struct SettingsToggleRow: View {
-    let title: String
-    let subtitle: String?
-    @Binding var binding: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
             Toggle(isOn: self.$binding) {
-                Text(self.title)
-                    .font(.body)
+                self.title.text
             }
-            .toggleStyle(.checkbox)
-
-            if let subtitle, !subtitle.isEmpty {
-                Text(subtitle)
-                    .font(.footnote)
-                    .foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            .labelsHidden()
+            .toggleStyle(.switch)
         }
     }
 }

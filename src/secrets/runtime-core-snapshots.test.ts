@@ -1,3 +1,4 @@
+/** Tests core secrets runtime snapshot preparation and activation behavior. */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureAuthProfileStore } from "../agents/auth-profiles.js";
 import {
@@ -5,7 +6,12 @@ import {
   clearConfigCache,
   clearRuntimeConfigSnapshot,
 } from "../config/config.js";
-import { createEmptyPluginRegistry } from "../plugins/registry.js";
+import { resolveConfigForRead } from "../config/io.read-helpers.js";
+import {
+  getAuthoredConfigSecretRef,
+  setConfigResolutionFacts,
+} from "../config/resolution-facts.js";
+import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import { captureEnv, withEnvAsync } from "../test-utils/env.js";
 import {
@@ -155,17 +161,98 @@ describe("secrets runtime snapshot core lanes", () => {
     expect(snapshot.config.skills?.entries?.["review-pr"]?.apiKey).toBe("sk-skill-ref");
   });
 
-  it("resolves env refs for memory, talk, and gateway surfaces", async () => {
-    const snapshot = await prepareSecretsRuntimeSnapshot({
-      config: asConfig({
-        agents: {
-          defaults: {
-            memorySearch: {
-              remote: {
-                apiKey: { source: "env", provider: "default", id: "MEMORY_REMOTE_API_KEY" },
+  it.each([
+    {
+      name: "bare source resolves to a bare-looking literal",
+      authored: "$SOURCE",
+      sourceEnv: {},
+      runtimeEnv: { SOURCE: "$OTHER" },
+      expected: "$OTHER",
+      pendingSourceRef: true,
+    },
+    {
+      name: "bare source resolves to a braced-looking literal",
+      authored: "$SOURCE",
+      sourceEnv: {},
+      runtimeEnv: { SOURCE: "${OTHER}" },
+      expected: "${OTHER}",
+      pendingSourceRef: true,
+    },
+    {
+      name: "substitution resolves to a bare-looking literal",
+      authored: "${SOURCE}",
+      sourceEnv: { SOURCE: "$OTHER" },
+      runtimeEnv: {},
+      expected: "$OTHER",
+      pendingSourceRef: false,
+    },
+    {
+      name: "substitution resolves to a braced-looking literal",
+      authored: "${SOURCE}",
+      sourceEnv: { SOURCE: "${OTHER}" },
+      runtimeEnv: {},
+      expected: "${OTHER}",
+      pendingSourceRef: false,
+    },
+    {
+      name: "escaped source remains a braced-looking literal",
+      authored: "$${OTHER}",
+      sourceEnv: {},
+      runtimeEnv: {},
+      expected: "${OTHER}",
+      pendingSourceRef: false,
+    },
+  ])(
+    "materializes authored provider credentials without reinterpreting literals: $name",
+    async ({ authored, sourceEnv, runtimeEnv, expected, pendingSourceRef }) => {
+      const read = resolveConfigForRead(
+        {
+          models: {
+            providers: {
+              openai: {
+                baseUrl: "https://api.openai.com/v1",
+                apiKey: authored,
+                models: [],
               },
             },
           },
+        },
+        sourceEnv,
+      );
+      const config = asConfig(read.resolvedConfigRaw);
+      setConfigResolutionFacts(config, read.resolutionFacts);
+
+      const snapshot = await prepareSecretsRuntimeSnapshot({
+        config,
+        env: runtimeEnv,
+        includeAuthStoreRefs: false,
+        loadablePluginOrigins: new Map(),
+      });
+
+      expect(snapshot.config.models?.providers?.openai?.apiKey).toBe(expected);
+      expect(
+        getAuthoredConfigSecretRef(snapshot.sourceConfig, "models.providers.openai.apiKey") !==
+          null,
+      ).toBe(pendingSourceRef);
+      expect(
+        getAuthoredConfigSecretRef(snapshot.config, "models.providers.openai.apiKey"),
+      ).toBeNull();
+    },
+  );
+
+  it("resolves env refs for memory, talk, and gateway surfaces", async () => {
+    const snapshot = await prepareSecretsRuntimeSnapshot({
+      config: asConfig({
+        memory: {
+          search: {
+            remote: {
+              apiKey: { source: "env", provider: "default", id: "MEMORY_REMOTE_API_KEY" },
+            },
+          },
+        },
+
+        agents: {
+          defaults: {},
         },
         talk: {
           providers: {
@@ -193,7 +280,7 @@ describe("secrets runtime snapshot core lanes", () => {
       loadablePluginOrigins: new Map(),
     });
 
-    expect(snapshot.config.agents?.defaults?.memorySearch?.remote?.apiKey).toBe("mem-ref-key");
+    expect(snapshot.config.memory?.search?.remote?.apiKey).toBe("mem-ref-key");
     expect((snapshot.config.talk as { apiKey?: unknown } | undefined)?.apiKey).toBeUndefined();
     expect(snapshot.config.talk?.providers?.["acme-speech"]?.apiKey).toBe("talk-provider-ref-key");
     expect(snapshot.config.gateway?.remote?.token).toBe("remote-token-ref");
@@ -241,6 +328,48 @@ describe("secrets runtime snapshot core lanes", () => {
       | undefined;
     expect(copilotProfile?.type).toBe("token");
     expect(copilotProfile?.token).toBe("ghp-env-token");
+  });
+
+  it("can materialize auth stores without resolving unrelated config refs", async () => {
+    const resolvedApiKey = ["test", "auth", "profile", "value"].join("-");
+    const apiKeyRef = {
+      source: "env",
+      provider: "default",
+      id: "UNRELATED_PROVIDER_KEY",
+    } as const;
+    const config = asConfig({
+      models: {
+        providers: {
+          openai: {
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: apiKeyRef,
+            models: [],
+          },
+        },
+      },
+    });
+
+    const snapshot = await prepareSecretsRuntimeSnapshot({
+      config,
+      assignmentConfig: config,
+      env: { OPENAI_API_KEY: resolvedApiKey },
+      agentDirs: ["/tmp/openclaw-agent-main"],
+      includeConfigRefs: false,
+      loadablePluginOrigins: new Map(),
+      loadAuthStore: () =>
+        loadAuthStoreWithProfiles({
+          "openai:default": {
+            type: "api_key",
+            provider: "openai",
+            keyRef: OPENAI_ENV_KEY_REF,
+          },
+        }),
+    });
+
+    expect(snapshot.config.models?.providers?.openai?.apiKey).toEqual(apiKeyRef);
+    expect(snapshot.authStores[0]?.store.profiles["openai:default"]).toMatchObject({
+      key: resolvedApiKey,
+    });
   });
 
   it("resolves inline placeholder auth profiles to env refs", async () => {

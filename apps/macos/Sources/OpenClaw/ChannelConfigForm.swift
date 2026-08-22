@@ -42,35 +42,34 @@ struct ConfigSchemaForm: View {
             let literals = nonNull.compactMap(\.literalValue)
             if !literals.isEmpty, literals.count == nonNull.count {
                 return AnyView(
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let label { Text(label).font(.callout.weight(.semibold)) }
-                        if let help {
-                            Text(help)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Picker(
-                            "",
-                            selection: self.enumBinding(
-                                path,
-                                options: literals,
-                                defaultValue: schema.explicitDefault))
-                        {
-                            Text("Select…").tag(-1)
-                            ForEach(literals.indices, id: \ .self) { index in
-                                Text(String(describing: literals[index])).tag(index)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                    })
+                    self.renderEnumField(
+                        path: path,
+                        options: literals,
+                        defaultValue: schema.explicitDefault,
+                        label: label,
+                        help: help))
             }
+        }
+
+        if let options = schema.enumValues, !options.isEmpty {
+            return AnyView(
+                self.renderEnumField(
+                    path: path,
+                    options: options,
+                    defaultValue: schema.explicitDefault,
+                    label: label,
+                    help: help))
         }
 
         switch schema.schemaType {
         case "object":
+            if self.mode == .channelQuick, self.isChannelRoot(path) {
+                return AnyView(self.renderChannelQuickObject(schema, path: path, value: value))
+            }
+            let showHeader = !self.isNestedChannelQuickConfigurationObject(path: path, label: label)
             return AnyView(
                 VStack(alignment: .leading, spacing: 12) {
-                    if let label {
+                    if showHeader, let label {
                         Text(label)
                             .font(.callout.weight(.semibold))
                     }
@@ -81,7 +80,7 @@ struct ConfigSchemaForm: View {
                     }
                     let properties = schema.properties
                     let sortedKeys = self.visibleObjectKeys(properties: properties, path: path)
-                    ForEach(sortedKeys, id: \ .self) { key in
+                    ForEach(sortedKeys, id: \.self) { key in
                         if let child = properties[key] {
                             self.renderNode(child, path: path + [.key(key)])
                         }
@@ -89,16 +88,27 @@ struct ConfigSchemaForm: View {
                     if sortedKeys.isEmpty, self.mode == .channelQuick, self.isChannelRoot(path) {
                         self.renderChannelQuickEmptyState()
                     }
-                    if self.shouldRenderAdditionalProperties(schema, path: path, value: value) {
+                    if self.shouldRenderAdditionalProperties(schema, value: value) {
                         self.renderAdditionalProperties(schema, path: path, value: value)
                     }
                 })
         case "array":
             return AnyView(self.renderArray(schema, path: path, value: value, label: label, help: help))
         case "boolean":
+            if self.isChannelQuickLeaf(path) {
+                return AnyView(
+                    SettingsCardToggleRow(
+                        title: label.map(SettingsTextValue.verbatim) ?? "Enabled",
+                        subtitle: help.map(SettingsTextValue.verbatim),
+                        binding: self.boolBinding(path, defaultValue: schema.explicitDefault as? Bool)))
+            }
             return AnyView(
                 Toggle(isOn: self.boolBinding(path, defaultValue: schema.explicitDefault as? Bool)) {
-                    if let label { Text(label) } else { Text("Enabled") }
+                    if let label {
+                        Text(label)
+                    } else {
+                        Text("Enabled")
+                    }
                 }
                 .help(help ?? ""))
         case "number", "integer":
@@ -106,6 +116,9 @@ struct ConfigSchemaForm: View {
         case "string":
             return AnyView(self.renderStringField(schema, path: path, label: label, help: help))
         default:
+            if schema.literalValue != nil {
+                return AnyView(EmptyView())
+            }
             return AnyView(
                 VStack(alignment: .leading, spacing: 6) {
                     if let label { Text(label).font(.callout.weight(.semibold)) }
@@ -117,9 +130,19 @@ struct ConfigSchemaForm: View {
     }
 
     private func fieldLabel(for schema: ConfigSchemaNode, path: ConfigPath) -> String? {
-        hintForPath(path, hints: self.store.configUiHints)?.label
+        let label = hintForPath(path, hints: self.store.configUiHints)?.label
             ?? schema.title
             ?? labelForConfigPath(path)
+        return self.cleanedChannelQuickLabel(label, path: path)
+    }
+
+    private func cleanedChannelQuickLabel(_ label: String?, path: ConfigPath) -> String? {
+        guard self.mode == .channelQuick, path.count >= 3 else { return label }
+        guard case let .key(channelId) = path[1] else { return label }
+        guard let label else { return nil }
+        let prefix = humanizeConfigKey(channelId) + " "
+        guard label.hasPrefix(prefix) else { return label }
+        return String(label.dropFirst(prefix.count))
     }
 
     private func visibleObjectKeys(
@@ -161,7 +184,10 @@ struct ConfigSchemaForm: View {
         let variants = schema.anyOf.isEmpty ? schema.oneOf : schema.anyOf
         let nonNullVariants = variants.filter { !$0.isNullSchema }
         if !nonNullVariants.isEmpty {
-            return nonNullVariants.allSatisfy(self.isSimpleField)
+            if nonNullVariants.count == 1, let only = nonNullVariants.first {
+                return self.isSimpleField(only)
+            }
+            return nonNullVariants.allSatisfy { $0.literalValue != nil }
         }
         if let enumValues = schema.enumValues {
             return !enumValues.isEmpty
@@ -176,7 +202,6 @@ struct ConfigSchemaForm: View {
 
     private func shouldRenderAdditionalProperties(
         _ schema: ConfigSchemaNode,
-        path: ConfigPath,
         value: Any?) -> Bool
     {
         guard schema.allowsAdditionalProperties else { return false }
@@ -186,11 +211,54 @@ struct ConfigSchemaForm: View {
         return dict.keys.contains { !reserved.contains($0) }
     }
 
+    private func isChannelQuickLeaf(_ path: ConfigPath) -> Bool {
+        guard self.mode == .channelQuick, path.count == 3 else { return false }
+        guard case .key("channels") = path[0] else { return false }
+        guard case .key = path[1], case .key = path[2] else { return false }
+        return true
+    }
+
     private func isChannelRoot(_ path: ConfigPath) -> Bool {
         guard path.count == 2 else { return false }
         guard case .key("channels") = path[0] else { return false }
         guard case .key = path[1] else { return false }
         return true
+    }
+
+    private func isNestedChannelQuickConfigurationObject(path: ConfigPath, label: String?) -> Bool {
+        guard self.mode == .channelQuick, path.count == 3 else { return false }
+        guard case .key("channels") = path[0] else { return false }
+        guard case .key = path[1] else { return false }
+        guard label == "Configuration" else { return false }
+        return true
+    }
+
+    @ViewBuilder
+    private func renderChannelQuickObject(
+        _ schema: ConfigSchemaNode,
+        path: ConfigPath,
+        value: Any?) -> some View
+    {
+        let properties = schema.properties
+        let sortedKeys = self.visibleObjectKeys(properties: properties, path: path)
+
+        VStack(alignment: .leading, spacing: 16) {
+            if sortedKeys.isEmpty {
+                self.renderChannelQuickEmptyState()
+            } else {
+                SettingsCardGroup("Configuration") {
+                    ForEach(sortedKeys, id: \.self) { key in
+                        if let child = properties[key] {
+                            self.renderNode(child, path: path + [.key(key)])
+                        }
+                    }
+                }
+            }
+
+            if self.shouldRenderAdditionalProperties(schema, value: value) {
+                self.renderAdditionalProperties(schema, path: path, value: value)
+            }
+        }
     }
 
     private func renderChannelQuickEmptyState() -> some View {
@@ -226,6 +294,60 @@ struct ConfigSchemaForm: View {
         "webhookUrl",
     ]
 
+    private func renderChannelQuickField(
+        title: String?,
+        subtitle: String?,
+        @ViewBuilder control: () -> some View) -> some View
+    {
+        SettingsCardRow(
+            title: title.map(SettingsTextValue.verbatim) ?? "Value",
+            subtitle: subtitle.map(SettingsTextValue.verbatim))
+        {
+            control()
+        }
+    }
+
+    @ViewBuilder
+    private func renderEnumField(
+        path: ConfigPath,
+        options: [Any],
+        defaultValue: Any?,
+        label: String?,
+        help: String?) -> some View
+    {
+        let picker = Picker(
+            "",
+            selection: self.enumBinding(
+                path,
+                options: options,
+                defaultValue: defaultValue))
+        {
+            Text("Select…").tag(-1)
+            ForEach(options.indices, id: \.self) { index in
+                Text(String(describing: options[index])).tag(index)
+            }
+        }
+        .pickerStyle(.menu)
+
+        if self.isChannelQuickLeaf(path) {
+            self.renderChannelQuickField(title: label, subtitle: help) {
+                picker
+                    .labelsHidden()
+                    .frame(width: 180)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                if let label { Text(label).font(.callout.weight(.semibold)) }
+                if let help {
+                    Text(help)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                picker
+            }
+        }
+    }
+
     @ViewBuilder
     private func renderStringField(
         _ schema: ConfigSchemaNode,
@@ -237,27 +359,33 @@ struct ConfigSchemaForm: View {
         let placeholder = hint?.placeholder ?? ""
         let sensitive = hint?.sensitive ?? isSensitivePath(path)
         let defaultValue = schema.explicitDefault as? String
-        VStack(alignment: .leading, spacing: 6) {
-            if let label { Text(label).font(.callout.weight(.semibold)) }
-            if let help {
-                Text(help)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let options = schema.enumValues {
-                Picker("", selection: self.enumBinding(path, options: options, defaultValue: schema.explicitDefault)) {
-                    Text("Select…").tag(-1)
-                    ForEach(options.indices, id: \ .self) { index in
-                        Text(String(describing: options[index])).tag(index)
-                    }
+        if self.isChannelQuickLeaf(path) {
+            self.renderChannelQuickField(title: label, subtitle: help) {
+                if sensitive {
+                    SecureField(placeholder, text: self.stringBinding(path, defaultValue: defaultValue))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 260)
+                } else {
+                    TextField(placeholder, text: self.stringBinding(path, defaultValue: defaultValue))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 260)
                 }
-                .pickerStyle(.menu)
-            } else if sensitive {
-                SecureField(placeholder, text: self.stringBinding(path, defaultValue: defaultValue))
-                    .textFieldStyle(.roundedBorder)
-            } else {
-                TextField(placeholder, text: self.stringBinding(path, defaultValue: defaultValue))
-                    .textFieldStyle(.roundedBorder)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                if let label { Text(label).font(.callout.weight(.semibold)) }
+                if let help {
+                    Text(help)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if sensitive {
+                    SecureField(placeholder, text: self.stringBinding(path, defaultValue: defaultValue))
+                        .textFieldStyle(.roundedBorder)
+                } else {
+                    TextField(placeholder, text: self.stringBinding(path, defaultValue: defaultValue))
+                        .textFieldStyle(.roundedBorder)
+                }
             }
         }
     }
@@ -271,20 +399,33 @@ struct ConfigSchemaForm: View {
     {
         let defaultValue = (schema.explicitDefault as? Double)
             ?? (schema.explicitDefault as? Int).map(Double.init)
-        VStack(alignment: .leading, spacing: 6) {
-            if let label { Text(label).font(.callout.weight(.semibold)) }
-            if let help {
-                Text(help)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        if self.isChannelQuickLeaf(path) {
+            self.renderChannelQuickField(title: label, subtitle: help) {
+                TextField(
+                    "",
+                    text: self.numberBinding(
+                        path,
+                        isInteger: schema.schemaType == "integer",
+                        defaultValue: defaultValue))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 120)
             }
-            TextField(
-                "",
-                text: self.numberBinding(
-                    path,
-                    isInteger: schema.schemaType == "integer",
-                    defaultValue: defaultValue))
-                .textFieldStyle(.roundedBorder)
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                if let label { Text(label).font(.callout.weight(.semibold)) }
+                if let help {
+                    Text(help)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                TextField(
+                    "",
+                    text: self.numberBinding(
+                        path,
+                        isInteger: schema.schemaType == "integer",
+                        defaultValue: defaultValue))
+                    .textFieldStyle(.roundedBorder)
+            }
         }
     }
 
@@ -305,7 +446,7 @@ struct ConfigSchemaForm: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            ForEach(items.indices, id: \ .self) { index in
+            ForEach(items.indices, id: \.self) { index in
                 HStack(alignment: .top, spacing: 8) {
                     if let itemSchema {
                         self.renderNode(itemSchema, path: path + [.index(index)])
@@ -354,7 +495,7 @@ struct ConfigSchemaForm: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(extras, id: \ .self) { key in
+                    ForEach(extras, id: \.self) { key in
                         let itemPath: ConfigPath = path + [.key(key)]
                         HStack(alignment: .top, spacing: 8) {
                             TextField("Key", text: self.mapKeyBinding(path: path, key: key))
@@ -477,7 +618,12 @@ struct ChannelConfigForm: View {
 
     var body: some View {
         if self.store.configSchemaLoading {
-            ProgressView().controlSize(.small)
+            SettingsCardGroup("Configuration") {
+                SettingsCardRow(title: "Loading channel settings", subtitle: nil, showsDivider: false) {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
         } else if let schema = store.channelConfigSchema(for: channelId) {
             ConfigSchemaForm(
                 store: self.store,
@@ -485,9 +631,15 @@ struct ChannelConfigForm: View {
                 path: [.key("channels"), .key(self.channelId)],
                 mode: .channelQuick)
         } else {
-            Text("Schema unavailable for this channel.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            SettingsCardGroup("Configuration") {
+                SettingsCardRow(
+                    title: "Schema unavailable",
+                    subtitle: "OpenClaw could not load editable settings for this channel.",
+                    showsDivider: false)
+                {
+                    EmptyView()
+                }
+            }
         }
     }
 }
