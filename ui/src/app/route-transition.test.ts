@@ -1,22 +1,29 @@
+import { createRouter } from "@openclaw/uirouter";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CHAT_ROUTE_READY_EVENT, navigateWithRouteTransition } from "./route-transition.ts";
+import type { RouteId } from "../app-routes.ts";
+import { CHAT_ROUTE_READY_EVENT } from "../pages/chat/chat-history-events.ts";
+import type { ControlUiReadinessOutlet } from "./control-ui-readiness.ts";
+import { navigateWithRouteTransition } from "./route-transition.ts";
 
 function testDocumentWithOutlet(animate = vi.fn()) {
-  const outlet = document.createElement("openclaw-router-outlet") as HTMLElement & {
-    updateComplete: Promise<void>;
-  };
-  // Own data property: the real OpenClawRouterOutlet may already be registered by a
-  // sibling test in this worker, and Lit's updateComplete is a getter-only accessor.
-  Object.defineProperty(outlet, "updateComplete", {
-    value: Promise.resolve(),
-    configurable: true,
+  const router = createRouter<RouteId>({
+    routes: [
+      { id: "chat", path: "/chat", component: () => ({}) },
+      { id: "about", path: "/about", component: () => ({}) },
+    ],
   });
+  void router.navigate("chat", undefined);
+  const outlet = Object.assign(document.createElement("openclaw-router-outlet"), {
+    presentationSettled: true,
+    settlePresentation: async () => true,
+  }) satisfies ControlUiReadinessOutlet;
   outlet.animate = animate;
   document.body.append(outlet);
   return {
     animate,
     document,
     outlet,
+    router,
   };
 }
 
@@ -37,6 +44,8 @@ describe("navigateWithRouteTransition", () => {
 
     const transition = navigateWithRouteTransition({
       document: test.document,
+      getOutlet: () => test.outlet,
+      router: test.router,
       from: "new-session",
       to: "chat",
       navigate,
@@ -65,6 +74,8 @@ describe("navigateWithRouteTransition", () => {
     await expect(
       navigateWithRouteTransition({
         document: test.document,
+        getOutlet: () => test.outlet,
+        router: test.router,
         from: "new-session",
         to: "chat",
         navigate,
@@ -85,6 +96,8 @@ describe("navigateWithRouteTransition", () => {
 
     await navigateWithRouteTransition({
       document: test.document,
+      getOutlet: () => test.outlet,
+      router: test.router,
       from,
       to,
       navigate,
@@ -95,11 +108,36 @@ describe("navigateWithRouteTransition", () => {
     expect(test.animate).not.toHaveBeenCalled();
   });
 
+  it("cancels a running entrance when another route takes over", async () => {
+    const cancel = vi.fn();
+    const running: Partial<Animation> = { finished: new Promise(() => {}), cancel };
+    const animate = vi.fn(() => running as Animation);
+    const test = testDocumentWithOutlet(animate);
+    const transition = navigateWithRouteTransition({
+      document: test.document,
+      getOutlet: () => test.outlet,
+      router: test.router,
+      from: "new-session",
+      to: "chat",
+      navigate: async () => undefined,
+      prefersReducedMotion: false,
+    });
+    document.dispatchEvent(new Event(CHAT_ROUTE_READY_EVENT));
+    await vi.waitFor(() => expect(animate).toHaveBeenCalledOnce());
+
+    await test.router.navigate("about", undefined);
+    await transition;
+
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it("waits for the chat route without animating when motion is reduced", async () => {
     const test = testDocumentWithOutlet();
     const navigate = vi.fn(async () => undefined);
     const transition = navigateWithRouteTransition({
       document: test.document,
+      getOutlet: () => test.outlet,
+      router: test.router,
       from: "new-session",
       to: "chat",
       navigate,
@@ -110,6 +148,59 @@ describe("navigateWithRouteTransition", () => {
     document.dispatchEvent(new Event(CHAT_ROUTE_READY_EVENT));
     await transition;
 
+    expect(test.animate).not.toHaveBeenCalled();
+  });
+
+  it("keeps waiting through same-path focus cleanup but retires a different Chat destination", async () => {
+    const test = testDocumentWithOutlet();
+    await test.router.navigate("chat", undefined);
+    const navigation = test.router.navigate(
+      "chat",
+      undefined,
+      {},
+      {
+        pathname: "/chat/main/first",
+        search: "?focusComposer=1",
+        hash: "",
+      },
+    );
+    const transition = navigateWithRouteTransition({
+      document,
+      getOutlet: () => test.outlet,
+      router: test.router,
+      from: "new-session",
+      to: "chat",
+      navigate: () => navigation,
+      prefersReducedMotion: false,
+    });
+    await navigation;
+    let settled = false;
+    void transition.then(() => {
+      settled = true;
+    });
+    await test.router.navigate(
+      "chat",
+      undefined,
+      { history: "replace" },
+      {
+        pathname: "/chat/main/first",
+        search: "",
+        hash: "",
+      },
+    );
+    expect(settled).toBe(false);
+    await test.router.navigate(
+      "chat",
+      undefined,
+      {},
+      {
+        pathname: "/chat/main/second",
+        search: "",
+        hash: "",
+      },
+    );
+    await transition;
+    document.dispatchEvent(new Event(CHAT_ROUTE_READY_EVENT));
     expect(test.animate).not.toHaveBeenCalled();
   });
 });
